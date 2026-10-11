@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { IMG } from "./images.js";
 
 // ---------------------------------------------------------------------------
 // Diva Refeições — sistema de pedidos conectado ao Supabase
@@ -57,6 +58,7 @@ function buildWhatsappOrderLink(order) {
     ...order.items.flatMap((item) => itemLines(item)),
     "",
     `*Bebida:* ${order.drink}`,
+    ...(order.notes ? [`*Observações:* ${order.notes}`] : []),
     `*Entrega:* ${order.address}`,
     `*Pagamento:* ${order.payment}`,
     ...(order.payment === "Dinheiro" && order.changeAmount != null
@@ -134,6 +136,102 @@ const RUBACAO_SIZES = ["RP", "RM", "RG"];
 const RUBACAO_PRICES = { RP: 16, RM: 22, RG: 28 };
 const RUBACAO_PRINCIPAL_LIMITS = { RP: 1, RM: 2, RG: 2 };
 
+function resizeImage(file, w, h, quality) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        const scale = Math.max(w / img.width, h / img.height);
+        const dw = img.width * scale;
+        const dh = img.height * scale;
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      } catch (e) {
+        reject(e);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("imagem inválida"));
+    };
+    img.src = url;
+  });
+}
+
+const PHOTO_SIZES = { thumb: [160, 160, 0.8], wide: [400, 260, 0.76], hero: [720, 450, 0.72] };
+
+function PhotoButton({ src, fallback, kind = "thumb", onSave, onRemove }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [w, h, q] = PHOTO_SIZES[kind];
+  async function pick(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const data = await resizeImage(file, w, h, q);
+      await onSave(data);
+    } catch (x) {
+      setErr("Não consegui salvar a foto. Confira o SQL das fotos no Supabase.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function remove() {
+    setBusy(true);
+    setErr("");
+    try {
+      await onRemove();
+    } catch (x) {
+      setErr("Não consegui remover.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  const shown = src || fallback;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ width: kind === "thumb" ? 48 : 72, height: 48, borderRadius: 10, background: "#F6EAD3", overflow: "hidden", flexShrink: 0 }}>
+        {shown && <img src={shown} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
+        <label style={{ ...pill(false), padding: "6px 12px", opacity: busy ? 0.6 : 1, cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+          {busy ? "Enviando..." : src ? "Trocar foto" : "📷 Enviar foto"}
+          <input type="file" accept="image/*" onChange={pick} disabled={busy} style={{ display: "none" }} />
+        </label>
+        {src && onRemove && (
+          <button onClick={remove} disabled={busy} style={{ border: "none", background: "none", color: "#A32D2D", fontSize: 12, cursor: "pointer", padding: 0 }}>
+            Remover
+          </button>
+        )}
+        {err && <span style={{ color: "#A32D2D", fontSize: 11.5, maxWidth: 190 }}>{err}</span>}
+      </div>
+    </div>
+  );
+}
+
+function meatImage(name) {
+  const n = String(name || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  if (/(linguica|calabresa|salsicha)/.test(n)) return IMG.linguica;
+  if (/(peixe|tilapia|sardinha|merluza|pescada)/.test(n)) return IMG.peixe;
+  if (/(frango|peito|coxa|sobrecoxa|galinha)/.test(n)) return IMG.frango;
+  if (/(bisteca|porco|suin|pernil|lombo|costelinha)/.test(n)) return IMG.bisteca;
+  if (/(guisad|panela|cozid|ensopad|dobradinha|feijoada)/.test(n)) return IMG.panela;
+  if (/(bife|carne|isca|boi|bovin|file|alcatra|acem|patinho|costela)/.test(n)) return IMG.bovina;
+  return null;
+}
+
 function isRubacaoSize(s) {
   return RUBACAO_SIZES.includes(s);
 }
@@ -192,6 +290,7 @@ function mapSettings(row) {
     closeHour: row.close_hour != null ? Number(row.close_hour) : 14,
     deliveryStartHour: row.delivery_start_hour != null ? Number(row.delivery_start_hour) : 11,
     soldOutDate: row.sold_out_date || null,
+    images: row.images && typeof row.images === "object" ? row.images : {},
   };
 }
 
@@ -207,11 +306,11 @@ async function loadMenuFromSupabase() {
   const settings = mapSettings(settingsRows[0]);
   return {
     ...settings,
-    principals: principals.map((p) => ({ id: p.id, name: p.name, available: p.available, extraPrice: Number(p.extra_price) })),
+    principals: principals.map((p) => ({ id: p.id, name: p.name, available: p.available, extraPrice: Number(p.extra_price), imageUrl: p.image_url || null })),
     acompanhamentos: acompanhamentos.map((s) => ({ id: s.id, name: s.name, available: s.available })),
     saladas: saladas.map((s) => ({ id: s.id, name: s.name, available: s.available })),
     feijaoOpcoes: feijaoOpcoes.map((f) => ({ id: f.id, name: f.name, available: f.available })),
-    drinks: drinks.map((d) => ({ id: d.id, name: d.name, price: Number(d.price) })),
+    drinks: drinks.map((d) => ({ id: d.id, name: d.name, price: Number(d.price), imageUrl: d.image_url || null })),
   };
 }
 
@@ -240,6 +339,7 @@ function mapOrderFromSupabase(o) {
     changeAmount: o.change_amount != null ? Number(o.change_amount) : null,
     items,
     drink: o.drink_name || "Sem bebida",
+    notes: o.notes || "",
     total: Number(o.total),
     status: o.status,
     createdAt: new Date(o.created_at),
@@ -249,6 +349,61 @@ function mapOrderFromSupabase(o) {
 // ---------------------------------------------------------------------------
 // FLUXO DO CLIENTE
 // ---------------------------------------------------------------------------
+
+const APP_CSS = `
+*{box-sizing:border-box}
+button{transition:transform .15s ease,box-shadow .15s ease,filter .15s ease}
+button:active{transform:scale(.985)}
+button:focus-visible,input:focus-visible,textarea:focus-visible,a:focus-visible{outline:3px solid rgba(204,154,58,.65);outline-offset:2px}
+.diva-admin-layout{display:grid;grid-template-columns:232px minmax(0,1fr);gap:22px;align-items:start}
+.diva-sidebar{position:sticky;top:14px;background:linear-gradient(180deg,#651323,#4a0d19);border-radius:20px;padding:16px 12px;display:flex;flex-direction:column;gap:4px;box-shadow:0 12px 30px rgba(74,13,25,.25)}
+.diva-sidebar-brand{color:#E8C874;font-family:Fraunces,Georgia,serif;font-size:18px;font-weight:700;padding:6px 10px 14px;border-bottom:1px solid rgba(232,200,116,.2);margin-bottom:8px}
+.diva-nav{display:flex;align-items:center;gap:10px;width:100%;padding:11px 12px;border:none;border-radius:12px;background:transparent;color:#f3dfc8;font-family:Inter,sans-serif;font-size:14px;font-weight:600;cursor:pointer;text-align:left}
+.diva-nav:hover{background:rgba(255,255,255,.08)}
+.diva-nav.active{background:#E8C874;color:#4a0d19}
+.diva-nav-sep{flex:1;min-height:12px}
+.diva-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.diva-stat{display:flex;align-items:center;gap:12px}
+@media(max-width:900px){.diva-admin-layout{grid-template-columns:1fr}.diva-sidebar{position:static;flex-direction:row;overflow-x:auto;padding:8px;gap:6px}.diva-sidebar-brand{display:none}.diva-nav{width:auto;white-space:nowrap;padding:9px 13px}.diva-nav-sep{display:none}.diva-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.diva-stat{flex-direction:column;align-items:flex-start;gap:8px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important;animation-duration:.01ms!important}}
+`;
+
+const STEP_TITLES = ["Escolha o tamanho", "Escolha o feijão", "Acompanhamentos", "Escolha as saladas", "Escolha a carne", "Meu pedido", "Bebidas", "Entrega", "Pagamento", "Confirmação"];
+
+function Check({ on }) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 22,
+        height: 22,
+        flexShrink: 0,
+        borderRadius: "50%",
+        border: `2px solid ${on ? TOKENS.red : "#D9C9AE"}`,
+        background: on ? TOKENS.red : "#fff",
+        color: "#fff",
+        fontSize: 13,
+        fontWeight: 700,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {on ? "✓" : ""}
+    </span>
+  );
+}
+
+function Stepper({ value, onMinus, onPlus, min = 0 }) {
+  const b = { width: 32, height: 32, borderRadius: "50%", border: `1.5px solid ${TOKENS.creamDeep}`, background: "#fff", color: TOKENS.red, fontSize: 18, fontWeight: 700, cursor: "pointer", lineHeight: 1, padding: 0 };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <button type="button" aria-label="Diminuir" onClick={onMinus} disabled={value <= min} style={{ ...b, opacity: value <= min ? 0.4 : 1 }}>−</button>
+      <span style={{ minWidth: 20, textAlign: "center", fontWeight: 700 }}>{value}</span>
+      <button type="button" aria-label="Aumentar" onClick={onPlus} style={b}>+</button>
+    </div>
+  );
+}
 
 function StepDots({ step, total }) {
   return (
@@ -281,7 +436,10 @@ function CustomerFlow({ menu, onOrderPlaced }) {
   const [rubacaoMacarrao, setRubacaoMacarrao] = useState(true);
   const [quantity, setQuantity] = useState(1);
   const [cart, setCart] = useState([]);
-  const [drink, setDrink] = useState("none");
+  const [drinkQty, setDrinkQty] = useState({});
+  const [stage, setStage] = useState("home");
+  const [category, setCategory] = useState("quentinha");
+  const [notes, setNotes] = useState("");
   const [form, setForm] = useState({ name: "", phone: "", address: "", payment: "Pix" });
   const [cashAmount, setCashAmount] = useState("");
   const [done, setDone] = useState(null);
@@ -299,8 +457,9 @@ function CustomerFlow({ menu, onOrderPlaced }) {
   const selectedPrincipalObjs = menu.principals.filter((p) => selectedPrincipals.includes(p.id));
   const extraPrincipal = size === "P" ? selectedPrincipalObjs.reduce((sum, p) => sum + (p.extraPrice || 0), 0) : 0;
   const feijaoObj = menu.feijaoOpcoes.find((f) => f.id === feijaoChoice);
-  const drinkObj = menu.drinks.find((d) => d.id === drink);
-  const drinkPrice = drinkObj ? drinkObj.price : 0;
+  const drinkLines = menu.drinks.filter((d) => (drinkQty[d.id] || 0) > 0).map((d) => ({ ...d, qty: drinkQty[d.id] }));
+  const drinkPrice = drinkLines.reduce((sum, d) => sum + d.price * d.qty, 0);
+  const drinkLabel = drinkLines.length ? drinkLines.map((d) => `${d.qty > 1 ? d.qty + "× " : ""}${d.name}`).join(", ") : null;
 
   // Item que está sendo montado agora (ainda não adicionado ao carrinho)
   const currentItemUnitPrice = sizePrice + extraPrincipal;
@@ -354,6 +513,36 @@ function CustomerFlow({ menu, onOrderPlaced }) {
 
   function removeCartItem(idx) {
     setCart((c) => c.filter((_, i) => i !== idx));
+  }
+
+  function changeCartQty(idx, delta) {
+    setCart((c) =>
+      c.map((it, i) => {
+        if (i !== idx) return it;
+        const q = Math.max(1, Math.min(20, it.quantity + delta));
+        return { ...it, quantity: q, subtotal: it.unitPrice * q };
+      })
+    );
+  }
+
+  function changeDrink(id, delta) {
+    setDrinkQty((q) => ({ ...q, [id]: Math.max(0, Math.min(20, (q[id] || 0) + delta)) }));
+  }
+
+  function goToCart() {
+    resetItemFields();
+    setStage("flow");
+    setStep(5);
+  }
+
+  function startFlow(cat) {
+    setCategory(cat);
+    setStage("flow");
+    setStep(0);
+    if (size && (cat === "rubacao") !== isRubacao) {
+      setSize(null);
+      setSelectedPrincipals([]);
+    }
   }
 
   // Rubacão não passa por Feijão (1) nem Acompanhamentos (2) — vai direto de
@@ -426,7 +615,8 @@ function CustomerFlow({ menu, onOrderPlaced }) {
       feijao_choice: first.feijao_choice,
       side_names: first.side_names,
       salada_names: first.salada_names,
-      drink_name: drinkObj ? drinkObj.name : null,
+      drink_name: drinkLabel,
+      ...(notes.trim() ? { notes: notes.trim() } : {}),
       payment_method: form.payment,
       cash_amount: form.payment === "Dinheiro" ? cashAmountNum : null,
       change_amount: form.payment === "Dinheiro" ? troco : null,
@@ -460,7 +650,10 @@ function CustomerFlow({ menu, onOrderPlaced }) {
     setRubacaoMacarrao(true);
     setQuantity(1);
     setCart([]);
-    setDrink("none");
+    setDrinkQty({});
+    setNotes("");
+    setStage("home");
+    setCategory("quentinha");
     setCashAmount("");
     setForm({ name: "", phone: "", address: "", payment: "Pix" });
   }
@@ -521,58 +714,144 @@ function CustomerFlow({ menu, onOrderPlaced }) {
     );
   }
 
+  const cartCount = cart.reduce((sum, it) => sum + it.quantity, 0);
+  const cartBar =
+    cart.length > 0 ? (
+      <button
+        onClick={goToCart}
+        style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 14, border: `1.5px solid ${TOKENS.gold}`, background: "#FCF6E8", color: TOKENS.ink, fontFamily: "Inter", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
+      >
+        <span>🛒 {cartCount} {cartCount === 1 ? "item" : "itens"} no pedido · {currency(cartSubtotal)}</span>
+        <span style={{ color: TOKENS.red }}>Ver pedido →</span>
+      </button>
+    ) : null;
+
+  if (stage === "home") {
+    const minQuentinha = Math.min(...SIZES.map((sz) => menu.sizePrices[sz]));
+    const minRubacao = Math.min(...RUBACAO_SIZES.map((sz) => RUBACAO_PRICES[sz]));
+    const catCard = { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4, padding: "16px 14px", borderRadius: 18, border: `1.5px solid ${TOKENS.creamDeep}`, background: "#fff", cursor: "pointer", textAlign: "left", fontFamily: "Inter", color: TOKENS.ink, boxShadow: "0 6px 18px rgba(140,18,32,0.06)" };
+    return (
+      <div style={{ display: "grid", gap: 14 }}>
+        <div style={{ position: "relative", overflow: "hidden", borderRadius: 22, minHeight: 280, background: "linear-gradient(135deg,#651323 0%,#8C1220 55%,#B8382F 100%)", boxShadow: "0 14px 34px rgba(101,19,35,.25)", display: "flex", alignItems: "flex-end" }}>
+          <img src={menu.images.hero || "/hero.jpg"} alt="" onError={(e) => { const el = e.currentTarget; if (el.dataset.fb) { el.style.display = "none"; return; } el.dataset.fb = "1"; el.src = IMG.hero; }} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+          <div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg,rgba(60,8,16,.15) 0%,rgba(60,8,16,.88) 100%)" }} />
+          <div style={{ position: "relative", padding: "24px 22px" }}>
+            <h1 style={{ fontFamily: "Fraunces", fontSize: 30, lineHeight: 1.1, color: "#FFF8EA", margin: "0 0 8px", fontWeight: 700 }}>
+              Seu almoço merece<br />esse carinho!
+            </h1>
+            <p style={{ color: "rgba(255,248,234,.92)", fontSize: 14, lineHeight: 1.5, margin: "0 0 16px" }}>
+              Quentinhas preparadas com ingredientes selecionados e muito sabor.
+            </p>
+            <button onClick={() => startFlow("quentinha")} style={{ ...primaryBtn(), background: TOKENS.goldLight, color: TOKENS.redDark }}>
+              Fazer meu pedido
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+          {[["🍲", "Comida caseira"], ["🥬", "Ingredientes selecionados"], ["🛵", "Entrega rápida"]].map(([ic, label]) => (
+            <div key={label} style={{ background: "#fff", border: `1px solid ${TOKENS.creamDeep}`, borderRadius: 14, padding: "10px 6px", textAlign: "center", fontSize: 12, color: TOKENS.inkSoft, fontWeight: 600 }}>
+              <div style={{ fontSize: 22, marginBottom: 2 }}>{ic}</div>
+              {label}
+            </div>
+          ))}
+        </div>
+
+        {cartBar}
+
+        <div style={{ display: "grid", gridTemplateColumns: menu.rubacaoEnabled ? "1fr 1fr" : "1fr", gap: 12 }}>
+          <button onClick={() => startFlow("quentinha")} style={{ ...catCard, padding: 0, gap: 0, overflow: "hidden" }}>
+            <img src={menu.images.M || IMG.quentinhaM} alt="" style={{ width: "100%", height: 96, objectFit: "cover", display: "block" }} />
+            <span style={{ padding: "10px 14px 14px", display: "flex", flexDirection: "column", gap: 4 }}>
+              <b style={{ fontFamily: "Fraunces", fontSize: 18, color: TOKENS.red }}>Quentinha</b>
+              <span style={{ fontSize: 12.5, color: TOKENS.inkSoft }}>P, M ou G · a partir de {currency(minQuentinha)}</span>
+            </span>
+          </button>
+          {menu.rubacaoEnabled && (
+            <button onClick={() => startFlow("rubacao")} style={{ ...catCard, padding: 0, gap: 0, overflow: "hidden" }}>
+              <img src={menu.images.RM || IMG.rubacao} alt="" style={{ width: "100%", height: 96, objectFit: "cover", display: "block" }} />
+              <span style={{ padding: "10px 14px 14px", display: "flex", flexDirection: "column", gap: 4 }}>
+                <b style={{ fontFamily: "Fraunces", fontSize: 18, color: TOKENS.red }}>Rubacão</b>
+                <span style={{ fontSize: 12.5, color: TOKENS.inkSoft }}>Escolha o tamanho · a partir de {currency(minRubacao)}</span>
+              </span>
+            </button>
+          )}
+        </div>
+
+        <div style={{ ...catCard, cursor: "default", flexDirection: "row", alignItems: "center", gap: 12, background: "#FCF6E8" }}>
+          <span style={{ fontSize: 26 }}>🥤</span>
+          <span>
+            <b style={{ display: "block", fontFamily: "Fraunces", fontSize: 16, color: TOKENS.red }}>Bebidas</b>
+            <span style={{ fontSize: 12.5, color: TOKENS.inkSoft }}>Complete seu pedido — escolha na etapa de bebidas.</span>
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  const flowTitle = isRubacao && step === 2 ? "Macarrão" : STEP_TITLES[step];
+
   return (
     <div style={card()}>
-      <StepDots step={step} total={steps.length - 1} />
-      <p style={{ textAlign: "center", fontSize: 12, letterSpacing: 1.5, color: TOKENS.gold, fontWeight: 700, textTransform: "uppercase", marginBottom: 2 }}>
-        {steps[step]}
-      </p>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <button
+          onClick={() => (step === 0 ? setStage("home") : setStep(prevStepFrom(step)))}
+          aria-label="Voltar"
+          style={{ width: 38, height: 38, borderRadius: "50%", border: `1.5px solid ${TOKENS.creamDeep}`, background: "#fff", color: TOKENS.red, fontSize: 20, fontWeight: 700, cursor: "pointer", flexShrink: 0, padding: 0, lineHeight: 1 }}
+        >
+          ‹
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: "Fraunces", fontSize: 20, fontWeight: 700, color: TOKENS.red, lineHeight: 1.15 }}>{flowTitle}</div>
+          <div style={{ fontSize: 12, color: TOKENS.inkSoft }}>Etapa {step + 1} de {steps.length}</div>
+        </div>
+      </div>
+      <div style={{ height: 6, borderRadius: 999, background: "#EFE3CB", marginBottom: 18, overflow: "hidden" }}>
+        <div style={{ width: `${((step + 1) / steps.length) * 100}%`, height: "100%", background: TOKENS.gold, borderRadius: 999, transition: "width .25s ease" }} />
+      </div>
 
       {step === 0 && (
         <div style={{ display: "grid", gap: 12 }}>
-          {SIZES.map((s) => (
-            <button
-              key={s}
-              onClick={() => {
-                setSize(s);
-                setSelectedPrincipals([]);
-              }}
-              style={sizeOption(size === s)}
-            >
-              <span style={{ fontFamily: "Fraunces", fontSize: 22 }}>{s}</span>
-              <span style={{ flex: 1, textAlign: "left", marginLeft: 12 }}>
-                Quentinha {SIZE_LABELS[s]}
-              </span>
-              <span style={{ fontWeight: 700 }}>{currency(menu.sizePrices[s])}</span>
-            </button>
-          ))}
-
+          {cartBar}
           {menu.rubacaoEnabled && (
-            <>
-              <p style={{ fontSize: 12, letterSpacing: 1.5, color: TOKENS.gold, fontWeight: 700, textTransform: "uppercase", margin: "10px 0 0" }}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={() => { setCategory("quentinha"); if (isRubacao) { setSize(null); setSelectedPrincipals([]); } }}
+                style={{ ...pill(category === "quentinha" || !menu.rubacaoEnabled), flex: 1, padding: "10px 0", fontSize: 14 }}
+              >
+                Quentinhas
+              </button>
+              <button
+                onClick={() => { setCategory("rubacao"); if (size && !isRubacao) { setSize(null); setSelectedPrincipals([]); } }}
+                style={{ ...pill(category === "rubacao"), flex: 1, padding: "10px 0", fontSize: 14 }}
+              >
                 Rubacão
-              </p>
-              {RUBACAO_SIZES.map((s) => (
-                <button
-                  key={s}
-                  onClick={() => {
-                    setSize(s);
-                    setSelectedPrincipals([]);
-                  }}
-                  style={sizeOption(size === s)}
-                >
-                  <span style={{ fontFamily: "Fraunces", fontSize: 22 }}>{s.replace("R", "")}</span>
-                  <span style={{ flex: 1, textAlign: "left", marginLeft: 12 }}>
-                    Rubacão {SIZE_LABELS[s]}
-                    <span style={{ display: "block", fontSize: 11.5, color: TOKENS.inkSoft, fontWeight: 400 }}>
-                      {RUBACAO_PRINCIPAL_LIMITS[s]} tipo{RUBACAO_PRINCIPAL_LIMITS[s] > 1 ? "s" : ""} de carne · macarrão opcional
-                    </span>
-                  </span>
-                  <span style={{ fontWeight: 700 }}>{currency(RUBACAO_PRICES[s])}</span>
-                </button>
-              ))}
-            </>
+              </button>
+            </div>
           )}
+          {(category === "rubacao" && menu.rubacaoEnabled ? RUBACAO_SIZES : SIZES).map((sz) => {
+            const rub = isRubacaoSize(sz);
+            const price = rub ? RUBACAO_PRICES[sz] : menu.sizePrices[sz];
+            const limit = rub ? RUBACAO_PRINCIPAL_LIMITS[sz] : menu.principalLimits[sz];
+            const active = size === sz;
+            return (
+              <button key={sz} onClick={() => { setSize(sz); setSelectedPrincipals([]); }} style={{ ...sizeOption(active), gap: 12 }}>
+                <span style={{ position: "relative", width: 64, height: 56, flexShrink: 0 }}>
+                  <img src={menu.images[sz] || (rub ? IMG.rubacao : sz === "P" ? IMG.quentinhaP : IMG.quentinhaM)} alt="" style={{ width: 64, height: 56, objectFit: "cover", borderRadius: 12, display: "block" }} />
+                  <span style={{ position: "absolute", left: -6, top: -6, width: 24, height: 24, borderRadius: "50%", background: active ? TOKENS.red : "#fff", color: active ? "#fff" : TOKENS.red, border: `1.5px solid ${TOKENS.red}`, fontFamily: "Fraunces", fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {rub ? sz.slice(1) : sz}
+                  </span>
+                </span>
+                <span style={{ flex: 1, textAlign: "left" }}>
+                  <b style={{ display: "block", fontSize: 15 }}>{rub ? "Rubacão" : "Quentinha"} {SIZE_LABELS[sz]}</b>
+                  <span style={{ display: "block", fontSize: 12, color: TOKENS.inkSoft, marginTop: 2 }}>
+                    {limit} tipo{limit > 1 ? "s" : ""} de carne{rub ? " · macarrão opcional" : " · feijão, acompanhamentos e saladas"}
+                  </span>
+                </span>
+                <span style={{ fontWeight: 700, color: TOKENS.red }}>{currency(price)}</span>
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -582,7 +861,8 @@ function CustomerFlow({ menu, onOrderPlaced }) {
           <div style={{ display: "grid", gap: 10 }}>
             {menu.feijaoOpcoes.filter((f) => f.available).map((f) => (
               <button key={f.id} onClick={() => setFeijaoChoice(f.id)} style={choiceOption(feijaoChoice === f.id)}>
-                {f.name}
+                <span>{f.name}</span>
+                <Check on={feijaoChoice === f.id} />
               </button>
             ))}
           </div>
@@ -596,10 +876,12 @@ function CustomerFlow({ menu, onOrderPlaced }) {
               <p style={{ color: TOKENS.inkSoft, fontSize: 13, marginBottom: 12 }}>Deseja macarrão junto com o Rubacão?</p>
               <div style={{ display: "grid", gap: 10 }}>
                 <button onClick={() => setRubacaoMacarrao(true)} style={choiceOption(rubacaoMacarrao === true)}>
-                  Sim, quero macarrão
+                  <span>Sim, quero macarrão</span>
+                  <Check on={rubacaoMacarrao === true} />
                 </button>
                 <button onClick={() => setRubacaoMacarrao(false)} style={choiceOption(rubacaoMacarrao === false)}>
-                  Não, sem macarrão
+                  <span>Não, sem macarrão</span>
+                  <Check on={rubacaoMacarrao === false} />
                 </button>
               </div>
             </>
@@ -609,7 +891,8 @@ function CustomerFlow({ menu, onOrderPlaced }) {
               <div style={{ display: "grid", gap: 10 }}>
                 {menu.acompanhamentos.filter((s) => s.available).map((s) => (
                   <button key={s.id} onClick={() => toggleAcompanhamento(s.id)} style={choiceOption(selectedAcompanhamentos.includes(s.id))}>
-                    {s.name}
+                    <span>{s.name}</span>
+                    <Check on={selectedAcompanhamentos.includes(s.id)} />
                   </button>
                 ))}
               </div>
@@ -624,7 +907,8 @@ function CustomerFlow({ menu, onOrderPlaced }) {
           <div style={{ display: "grid", gap: 10 }}>
             {menu.saladas.filter((s) => s.available).map((s) => (
               <button key={s.id} onClick={() => toggleSalada(s.id)} style={choiceOption(selectedSaladas.includes(s.id))}>
-                {s.name}
+                <span>{s.name}</span>
+                <Check on={selectedSaladas.includes(s.id)} />
               </button>
             ))}
           </div>
@@ -638,11 +922,17 @@ function CustomerFlow({ menu, onOrderPlaced }) {
           </p>
           <div style={{ display: "grid", gap: 10 }}>
             {menu.principals.filter((p) => p.available).map((p) => (
-              <button key={p.id} onClick={() => togglePrincipal(p.id)} style={{ ...choiceOption(selectedPrincipals.includes(p.id)), display: "flex", justifyContent: "space-between" }}>
-                <span>{p.name}</span>
-                {p.extraPrice > 0 && size === "P" && (
-                  <span style={{ fontSize: 12, fontWeight: 700 }}>+{currency(p.extraPrice)}</span>
-                )}
+              <button key={p.id} onClick={() => togglePrincipal(p.id)} style={choiceOption(selectedPrincipals.includes(p.id))}>
+                <span style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                  {(p.imageUrl || meatImage(p.name)) && <img src={p.imageUrl || meatImage(p.name)} alt="" style={{ width: 52, height: 52, borderRadius: 12, objectFit: "cover", flexShrink: 0 }} />}
+                  <span>{p.name}</span>
+                </span>
+                <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  {p.extraPrice > 0 && size === "P" && (
+                    <span style={{ fontSize: 12, fontWeight: 700, color: TOKENS.red }}>+{currency(p.extraPrice)}</span>
+                  )}
+                  <Check on={selectedPrincipals.includes(p.id)} />
+                </span>
               </button>
             ))}
           </div>
@@ -704,35 +994,66 @@ function CustomerFlow({ menu, onOrderPlaced }) {
               <p style={{ fontSize: 11.5, letterSpacing: 1, color: TOKENS.gold, fontWeight: 700, textTransform: "uppercase", marginBottom: 8 }}>
                 Já no pedido ({cart.length})
               </p>
-              <div style={{ display: "grid", gap: 8 }}>
+              <div style={{ display: "grid", gap: 10 }}>
                 {cart.map((it, idx) => (
-                  <div key={idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", background: "#fff", border: `1px solid ${TOKENS.creamDeep}`, borderRadius: 10, padding: "10px 12px" }}>
-                    <div style={{ fontSize: 12.5, color: TOKENS.ink }}>
-                      <b>{it.quantity > 1 ? `${it.quantity}× ` : ""}{sizeDisplayName(it.size)}</b> — {currency(it.subtotal)}
-                      <div style={{ color: TOKENS.inkSoft, marginTop: 2 }}>{it.principal_names.join(", ")}</div>
+                  <div key={idx} style={{ background: "#fff", border: `1px solid ${TOKENS.creamDeep}`, borderRadius: 14, padding: "12px 14px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                      <b style={{ fontSize: 14.5 }}>{sizeDisplayName(it.size)}</b>
+                      <b style={{ color: TOKENS.red }}>{currency(it.subtotal)}</b>
                     </div>
-                    <button onClick={() => removeCartItem(idx)} style={{ border: "none", background: "none", color: TOKENS.red, fontSize: 16, cursor: "pointer", padding: "0 0 0 10px" }}>
-                      ×
-                    </button>
+                    <div style={{ fontSize: 12.5, color: TOKENS.inkSoft, margin: "4px 0 10px", lineHeight: 1.45 }}>
+                      {isRubacaoSize(it.size)
+                        ? `Macarrão: ${(it.side_names || []).includes("Macarrão") ? "Sim" : "Não"}`
+                        : `Feijão: ${it.feijao_choice || "—"} · ${(it.side_names || []).join(", ") || "Sem acompanhamentos"}`}
+                      {(it.salada_names || []).length > 0 ? ` · Saladas: ${it.salada_names.join(", ")}` : ""}
+                      {` · Carnes: ${it.principal_names.join(", ")}`}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <Stepper value={it.quantity} min={1} onMinus={() => changeCartQty(idx, -1)} onPlus={() => changeCartQty(idx, 1)} />
+                      <button onClick={() => removeCartItem(idx)} aria-label="Remover item" style={{ border: "none", background: "none", color: "#A32D2D", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                        🗑 Remover
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
           )}
+
+          <div style={{ marginTop: 16 }}>
+            <label htmlFor="diva-obs" style={fieldLabel()}>Observações</label>
+            <textarea
+              id="diva-obs"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              maxLength={300}
+              rows={3}
+              placeholder="Ex.: sem cebola, ponto da carne, etc."
+              style={{ ...smallInput(), marginTop: 6, resize: "vertical" }}
+            />
+          </div>
         </div>
       )}
 
       {step === 6 && (
         <div style={{ display: "grid", gap: 10 }}>
-          <button onClick={() => setDrink("none")} style={choiceOption(drink === "none")}>
-            Sem bebida
-          </button>
-          {menu.drinks.map((d) => (
-            <button key={d.id} onClick={() => setDrink(d.id)} style={{ ...choiceOption(drink === d.id), display: "flex", justifyContent: "space-between" }}>
-              <span>{d.name}</span>
-              <span style={{ fontWeight: 700 }}>{currency(d.price)}</span>
-            </button>
-          ))}
+          <p style={{ color: TOKENS.inkSoft, fontSize: 13, margin: 0 }}>Quer completar com bebida? (opcional)</p>
+          {menu.drinks.length === 0 && <p style={{ color: TOKENS.inkSoft, fontSize: 13 }}>Sem bebidas disponíveis hoje.</p>}
+          {menu.drinks.map((d) => {
+            const q = drinkQty[d.id] || 0;
+            return (
+              <div key={d.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 14px", border: `1.5px solid ${q > 0 ? TOKENS.red : TOKENS.creamDeep}`, borderRadius: 14, background: q > 0 ? "#FDF1EE" : "#fff" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                  {d.imageUrl && <img src={d.imageUrl} alt="" style={{ width: 48, height: 48, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />}
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 14.5 }}>{d.name}</div>
+                    <div style={{ fontSize: 13, color: TOKENS.inkSoft }}>{currency(d.price)}</div>
+                  </div>
+                </div>
+                <Stepper value={q} min={0} onMinus={() => changeDrink(d.id, -1)} onPlus={() => changeDrink(d.id, 1)} />
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -830,7 +1151,8 @@ function CustomerFlow({ menu, onOrderPlaced }) {
             </div>
           ))}
           <div style={{ height: 1, background: TOKENS.creamDeep, margin: "10px 0" }} />
-          <SummaryLine label="Bebida" value={drinkObj ? `${drinkObj.name} — ${currency(drinkObj.price)}` : "Sem bebida"} />
+          <SummaryLine label="Bebida" value={drinkLabel ? `${drinkLabel} — ${currency(drinkPrice)}` : "Sem bebida"} />
+          {notes.trim() && <SummaryLine label="Observações" value={notes.trim()} />}
           <SummaryLine label="Taxa de entrega" value={currency(menu.deliveryFee)} />
           {cardExtra > 0 && <SummaryLine label="Acréscimo da maquineta" value={currency(cardExtra)} />}
           <SummaryLine label="Pagamento" value={form.payment} />
@@ -871,8 +1193,8 @@ function CustomerFlow({ menu, onOrderPlaced }) {
             Continuar
           </button>
         ) : (
-          <button disabled={sending} onClick={confirmOrder} style={{ ...primaryBtn(), flex: 1, opacity: sending ? 0.6 : 1 }}>
-            {sending ? "Enviando..." : `Confirmar pedido — ${currency(total)}`}
+          <button disabled={sending} onClick={confirmOrder} style={{ ...primaryBtn(), background: "#1F8A4C", flex: 1, opacity: sending ? 0.6 : 1 }}>
+            {sending ? "Enviando..." : `Finalizar pedido — ${currency(total)}`}
           </button>
         )}
       </div>
@@ -1013,6 +1335,52 @@ function RenewalScreen({ accessUntil }) {
       >
         Já paguei, avisar no WhatsApp
       </a>
+    </div>
+  );
+}
+
+const PREVIEW_LABELS = {
+  open: "loja aberta",
+  closed: "tela de fechado",
+  sunday: "tela de domingo",
+  soldout: "tela de esgotado",
+  renewal: "tela de assinatura vencida",
+};
+
+function TestPanel({ menu, preview, onChange }) {
+  const now = new Date();
+  const expired = daysUntil(menu.accessUntil) != null && daysUntil(menu.accessUntil) < 0;
+  let status = "aberta";
+  if (expired) status = "bloqueada (assinatura vencida)";
+  else if (now.getDay() === 0) status = "fechada (domingo)";
+  else if (!isWithinOpeningHours(menu.openHour, menu.closeHour, now)) status = "fechada (fora do horário)";
+  else if (menu.soldOutDate === localDateStr(now)) status = "esgotada por hoje";
+  const options = [
+    ["", "Normal (como os clientes veem agora)"],
+    ["open", "Forçar loja aberta (ver o cardápio e fazer pedido)"],
+    ["closed", "Ver a tela de fechado"],
+    ["sunday", "Ver a tela de domingo"],
+    ["soldout", "Ver a tela de esgotado"],
+    ["renewal", "Ver a tela de assinatura vencida"],
+  ];
+  return (
+    <div style={panelCard()}>
+      <h3 style={panelTitle()}>Modo de teste da loja</h3>
+      <p style={{ fontSize: 13.5, color: TOKENS.ink, marginBottom: 4 }}>
+        Agora, para os clientes, a loja está <b>{status}</b>.
+      </p>
+      <p style={{ fontSize: 12.5, color: TOKENS.inkSoft, marginBottom: 14 }}>
+        Horário configurado: {formatHour(menu.openHour)} às {formatHour(menu.closeHour)}, de segunda a sábado. Para mudar o horário de todos os clientes, use <b>Preços e taxas</b> na aba Cardápio do dia.
+      </p>
+      <label style={fieldLabel()}>Ver a tela do cliente assim (só neste aparelho)</label>
+      <select value={preview} onChange={(e) => onChange(e.target.value)} style={{ ...smallInput(), width: "100%" }}>
+        {options.map(([v, l]) => (
+          <option key={v} value={v}>{l}</option>
+        ))}
+      </select>
+      <p style={{ fontSize: 12, color: TOKENS.inkSoft, marginTop: 10 }}>
+        Isso não muda nada para os clientes de verdade. Depois de escolher, toque em "Visão do cliente" para ver. Um pedido feito no teste é real: apague depois em Pedidos → Excluir.
+      </p>
     </div>
   );
 }
@@ -1159,7 +1527,7 @@ function groupOrdersByDay(orders) {
     }));
 }
 
-function AdminPanel({ menu, refreshMenu, orders, refreshOrders, devMode }) {
+function AdminPanel({ menu, refreshMenu, orders, refreshOrders, devMode, onLogout, preview, onPreviewChange }) {
   const [tab, setTab] = useState("cardapio");
   const [newPrincipal, setNewPrincipal] = useState("");
   const [newAcompanhamento, setNewAcompanhamento] = useState("");
@@ -1249,6 +1617,19 @@ function AdminPanel({ menu, refreshMenu, orders, refreshOrders, devMode }) {
     refreshMenu();
   }
 
+  async function saveItemImage(table, id, dataUrl) {
+    await sb(`${table}?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ image_url: dataUrl }) });
+    await refreshMenu();
+  }
+
+  async function saveSettingImage(key, dataUrl) {
+    const next = { ...(menu.images || {}) };
+    if (dataUrl) next[key] = dataUrl;
+    else delete next[key];
+    await sb("settings?id=eq.1", { method: "PATCH", body: JSON.stringify({ images: next }) });
+    await refreshMenu();
+  }
+
   async function updateDrinkPrice(id, val) {
     await sb(`drinks?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ price: Number(val) || 0 }) });
     refreshMenu();
@@ -1282,7 +1663,12 @@ function AdminPanel({ menu, refreshMenu, orders, refreshOrders, devMode }) {
         )}
       </div>
 
-      {tab === "assinatura" && devMode && <SubscriptionPanel menu={menu} refreshMenu={refreshMenu} />}
+      {tab === "assinatura" && devMode && (
+        <div style={{ display: "grid", gap: 18 }}>
+          <SubscriptionPanel menu={menu} refreshMenu={refreshMenu} />
+          <TestPanel menu={menu} preview={preview} onChange={onPreviewChange} />
+        </div>
+      )}
 
       {tab === "cardapio" && (
         <div style={{ display: "grid", gap: 18 }}>
@@ -1434,10 +1820,13 @@ function AdminPanel({ menu, refreshMenu, orders, refreshOrders, devMode }) {
               O acréscimo abaixo só é cobrado na quentinha Pequena — na Média e na Grande nunca soma nada.
             </p>
             {menu.principals.map((item) => (
-              <div key={item.id} style={rowLine()}>
-                <span style={{ color: item.available ? TOKENS.ink : "#B5A38F", textDecoration: item.available ? "none" : "line-through" }}>
-                  {item.name}
-                </span>
+              <div key={item.id} style={{ ...rowLine(), flexWrap: "wrap", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                  <PhotoButton src={item.imageUrl} fallback={meatImage(item.name)} kind="thumb" onSave={(d) => saveItemImage("principals", item.id, d)} onRemove={() => saveItemImage("principals", item.id, null)} />
+                  <span style={{ color: item.available ? TOKENS.ink : "#B5A38F", textDecoration: item.available ? "none" : "line-through" }}>
+                    {item.name}
+                  </span>
+                </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <span style={{ fontSize: 12, color: TOKENS.inkSoft }}>+R$</span>
                   <input type="number" defaultValue={item.extraPrice} onBlur={(e) => updateExtraPrice(item.id, e.target.value)} style={{ ...smallInput(), width: 60 }} />
@@ -1508,13 +1897,37 @@ function AdminPanel({ menu, refreshMenu, orders, refreshOrders, devMode }) {
           <div style={panelCard()}>
             <h3 style={panelTitle()}>Bebidas</h3>
             {menu.drinks.map((d) => (
-              <div key={d.id} style={rowLine()}>
-                <span>{d.name}</span>
+              <div key={d.id} style={{ ...rowLine(), flexWrap: "wrap", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                  <PhotoButton src={d.imageUrl} fallback={null} kind="thumb" onSave={(img) => saveItemImage("drinks", d.id, img)} onRemove={() => saveItemImage("drinks", d.id, null)} />
+                  <span>{d.name}</span>
+                </div>
                 <input type="number" defaultValue={d.price} onBlur={(e) => updateDrinkPrice(d.id, e.target.value)} style={{ ...smallInput(), width: 80 }} />
               </div>
             ))}
             <AddRow value={newDrink} onChange={setNewDrink} onAdd={() => addDrink(newDrink, setNewDrink)} placeholder="Nova bebida" />
           </div>
+          <div style={panelCard()}>
+            <h3 style={panelTitle()}>Fotos do site</h3>
+            <p style={{ fontSize: 12.5, color: TOKENS.inkSoft, marginTop: -6, marginBottom: 10 }}>
+              Envie uma foto direto do celular. Onde não houver foto enviada, aparece a ilustração padrão. As fotos das carnes e das bebidas ficam em Cardápio e Bebidas.
+            </p>
+            {[
+              ["hero", "Capa da tela inicial", "hero", IMG.hero],
+              ["P", "Quentinha Pequena", "wide", IMG.quentinhaP],
+              ["M", "Quentinha Média", "wide", IMG.quentinhaM],
+              ["G", "Quentinha Grande", "wide", IMG.quentinhaM],
+              ["RP", "Rubacão Pequeno", "wide", IMG.rubacao],
+              ["RM", "Rubacão Médio", "wide", IMG.rubacao],
+              ["RG", "Rubacão Grande", "wide", IMG.rubacao],
+            ].map(([key, label, kind, fb]) => (
+              <div key={key} style={{ ...rowLine(), flexWrap: "wrap", gap: 8 }}>
+                <span>{label}</span>
+                <PhotoButton src={menu.images[key]} fallback={fb} kind={kind} onSave={(d) => saveSettingImage(key, d)} onRemove={() => saveSettingImage(key, null)} />
+              </div>
+            ))}
+          </div>
+
         </div>
       )}
 
@@ -1605,6 +2018,7 @@ function AdminPanel({ menu, refreshMenu, orders, refreshOrders, devMode }) {
                     </div>
                   ))}
                   <div style={{ marginTop: 4 }}>Bebida: {o.drink}</div>
+                  {o.notes && <div style={{ marginTop: 4 }}>Obs.: {o.notes}</div>}
                 </div>
                 <div style={{ fontSize: 13, color: TOKENS.inkSoft, marginBottom: 10 }}>
                   Entrega: {o.address} · Pagamento: {o.payment}
@@ -1627,9 +2041,12 @@ function AdminPanel({ menu, refreshMenu, orders, refreshOrders, devMode }) {
                       {s}
                     </button>
                   ))}
+                  <button onClick={() => printOrder(o)} style={{ ...pill(false), marginLeft: "auto" }}>
+                    🖨 Imprimir
+                  </button>
                   <button
                     onClick={() => deleteOrder(o.dbId)}
-                    style={{ ...pill(false), marginLeft: "auto", color: "#A32D2D", borderColor: "#F0C9C9" }}
+                    style={{ ...pill(false), color: "#A32D2D", borderColor: "#F0C9C9" }}
                   >
                     Excluir
                   </button>
@@ -1645,6 +2062,32 @@ function AdminPanel({ menu, refreshMenu, orders, refreshOrders, devMode }) {
       )}
     </div>
   );
+}
+
+function printOrder(o) {
+  const w = window.open("", "_blank", "width=420,height=640");
+  if (!w) {
+    window.alert("O navegador bloqueou a janela de impressão. Libere os pop-ups para este site e tente de novo.");
+    return;
+  }
+  const esc = (v) => String(v == null ? "" : v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const items = o.items
+    .map((it) => {
+      const lines = itemLines(it);
+      return `<div class="it"><b>${esc(lines[0])}</b><br>${lines.slice(1).map((l) => esc(l.trim())).join("<br>")}</div>`;
+    })
+    .join("");
+  const troco = o.payment === "Dinheiro" && o.changeAmount != null ? `<div><b>Troca com:</b> ${esc(currency(o.cashAmount))} · <b>Troco:</b> ${esc(currency(o.changeAmount))}</div>` : "";
+  w.document.write(
+    `<html><head><title>${esc(o.id)}</title><style>body{font-family:Arial,sans-serif;font-size:13px;padding:14px;color:#000}h1{font-size:17px;margin:0 0 4px}.it{margin:8px 0;padding-bottom:8px;border-bottom:1px dashed #999}hr{border:none;border-top:1px solid #000;margin:8px 0}</style></head><body>` +
+      `<h1>Diva Refeições</h1><div>${esc(o.id)} · ${esc(o.createdAt.toLocaleString("pt-BR"))}</div><hr>` +
+      `<div><b>Cliente:</b> ${esc(o.customerName)}${o.phone ? " · " + esc(o.phone) : ""}</div><div><b>Endereço:</b> ${esc(o.address)}</div><hr>` +
+      `${items}${o.notes ? `<div><b>Obs.:</b> ${esc(o.notes)}</div>` : ""}<div><b>Bebida:</b> ${esc(o.drink)}</div>` +
+      `<div><b>Pagamento:</b> ${esc(o.payment)}</div>${troco}<hr><div style="font-size:17px"><b>Total: ${esc(currency(o.total))}</b></div></body></html>`
+  );
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 250);
 }
 
 function AddRow({ value, onChange, onAdd, placeholder }) {
@@ -1732,11 +2175,15 @@ function sizeOption(active) {
 function choiceOption(active) {
   return {
     width: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
     padding: "13px 16px",
-    borderRadius: 12,
+    borderRadius: 14,
     border: `1.5px solid ${active ? TOKENS.red : TOKENS.creamDeep}`,
-    background: active ? TOKENS.red : "#fff",
-    color: active ? "#fff" : TOKENS.ink,
+    background: active ? "#FDF1EE" : "#fff",
+    color: TOKENS.ink,
     cursor: "pointer",
     fontFamily: "Inter",
     fontSize: 14.5,
@@ -1817,6 +2264,36 @@ export default function App() {
   const [view, setView] = useState("cliente");
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [devMode, setDevMode] = useState(false);
+  const [preview, setPreview] = useState(() => {
+    try {
+      return window.localStorage.getItem("diva_preview") || "";
+    } catch (e) {
+      return "";
+    }
+  });
+
+  function changePreview(v) {
+    setPreview(v);
+    try {
+      if (v) window.localStorage.setItem("diva_preview", v);
+      else window.localStorage.removeItem("diva_preview");
+    } catch (e) {
+      /* sem armazenamento: o teste vale só até recarregar */
+    }
+  }
+
+  function renderCustomerView() {
+    const flow = <CustomerFlow menu={menu} onOrderPlaced={() => refreshOrders()} />;
+    if (preview === "open") return flow;
+    if (preview === "closed") return <ClosedScreen openHour={menu.openHour} closeHour={menu.closeHour} now={new Date(2026, 9, 14, 20, 0)} />;
+    if (preview === "sunday") return <ClosedScreen openHour={menu.openHour} closeHour={menu.closeHour} now={new Date(2026, 9, 11, 12, 0)} />;
+    if (preview === "soldout") return <SoldOutScreen closeHour={menu.closeHour} />;
+    if (preview === "renewal") return <RenewalScreen accessUntil={menu.accessUntil || localDateStr(new Date())} />;
+    if (daysUntil(menu.accessUntil) != null && daysUntil(menu.accessUntil) < 0) return <RenewalScreen accessUntil={menu.accessUntil} />;
+    if (!isWithinOpeningHours(menu.openHour, menu.closeHour, now)) return <ClosedScreen openHour={menu.openHour} closeHour={menu.closeHour} now={now} />;
+    if (menu.soldOutDate === localDateStr(now)) return <SoldOutScreen closeHour={menu.closeHour} />;
+    return flow;
+  }
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -1865,8 +2342,8 @@ export default function App() {
 
   return (
     <div style={{ minHeight: "100vh", background: `linear-gradient(180deg, ${TOKENS.redDark} 0%, ${TOKENS.red} 220px, ${TOKENS.cream} 220px)`, fontFamily: "Inter" }}>
-      <style>{FONTS_IMPORT}</style>
-      <div style={{ maxWidth: 460, margin: "0 auto", padding: "0 16px 60px" }}>
+      <style>{FONTS_IMPORT}{APP_CSS}</style>
+      <div style={{ maxWidth: 520, margin: "0 auto", padding: "0 16px 60px" }}>
         <header style={{ padding: "28px 4px 20px", display: "flex", alignItems: "center", gap: 12 }}>
           <Emblem size={46} />
           <div>
@@ -1911,6 +2388,13 @@ export default function App() {
           </div>
         )}
 
+        {view === "cliente" && menu && preview && (
+          <div style={{ background: "#FFF3D6", border: "1px solid #E9CE8F", borderRadius: 12, padding: "10px 14px", marginBottom: 14, fontSize: 13, color: TOKENS.ink, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <span>🧪 <b>Modo de teste</b> ligado só neste aparelho: {PREVIEW_LABELS[preview]}.</span>
+            <button onClick={() => changePreview("")} style={{ ...pill(false), flexShrink: 0 }}>Desligar</button>
+          </div>
+        )}
+
         {view === "admin" && adminUnlocked && menu && daysUntil(menu.accessUntil) != null && daysUntil(menu.accessUntil) <= 5 && (
           <div
             style={{
@@ -1932,19 +2416,11 @@ export default function App() {
         {!menu ? (
           <div style={card()}>Carregando cardápio...</div>
         ) : view === "cliente" ? (
-          daysUntil(menu.accessUntil) != null && daysUntil(menu.accessUntil) < 0 ? (
-            <RenewalScreen accessUntil={menu.accessUntil} />
-          ) : !isWithinOpeningHours(menu.openHour, menu.closeHour, now) ? (
-            <ClosedScreen openHour={menu.openHour} closeHour={menu.closeHour} now={now} />
-          ) : menu.soldOutDate === localDateStr(now) ? (
-            <SoldOutScreen closeHour={menu.closeHour} />
-          ) : (
-            <CustomerFlow menu={menu} onOrderPlaced={() => refreshOrders()} />
-          )
+          renderCustomerView()
         ) : !adminUnlocked ? (
           <AdminGate onUnlock={(isDev) => { setAdminUnlocked(true); setDevMode(isDev); }} />
         ) : (
-          <AdminPanel menu={menu} refreshMenu={refreshMenu} orders={orders} refreshOrders={refreshOrders} devMode={devMode} />
+          <AdminPanel menu={menu} refreshMenu={refreshMenu} orders={orders} refreshOrders={refreshOrders} devMode={devMode} onLogout={() => { setAdminUnlocked(false); setDevMode(false); }} preview={preview} onPreviewChange={changePreview} />
         )}
       </div>
     </div>
